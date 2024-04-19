@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+from xml.dom import minidom
+import logging
+from configparser import ConfigParser
+
+cmds = {
+        "exclusive": "lvchange -aey {lv}",
+        "unlock":    "lvchange -an {lv}",
+        "shared":    "lvchange -asy {lv}"
+        }
+
+default_actions = {
+        "prepare": "shared",
+        "started": "exclusive",
+        "stopped": "unlock",
+        "release": "unlock",
+        "migrate": "shared"
+        }
+
+config = ConfigParser()
+config.read("/etc/libvirt/hooks/qemu.ini")
+
+try:
+    actions = dict(config["actions"])
+except KeyError:
+    actions = default_actions
+
+loglevels = {
+        "debug"    : logging.DEBUG,
+        "info"     : logging.INFO,
+        "warning"  : logging.WARNING,
+        "error"    : logging.ERROR,
+        "critical" : logging.CRITICAL
+        }
+
+logging.basicConfig(filename=config.get("log","file",fallback='/var/log/libvirt/hooks/qemu.log'),
+                    encoding='utf-8',
+                    format='%(asctime)s [%(levelname)s] %(message)s',
+                    level=loglevels.get(config.get("log","level",fallback=None),logging.INFO)
+                    )
+
+logging.info("Called with args {}".format(str(sys.argv[1:])))
+
+dom_name = sys.argv[1]
+action = sys.argv[2]
+step = sys.argv[3]
+
+raw_xml = sys.stdin.read()
+xml = minidom.parseString(raw_xml)
+lvs = []
+for disk in xml.getElementsByTagName('disk'):
+    for source in disk.getElementsByTagName('source'):
+        item = source.getAttribute("dev")
+        lvs.append(item)
+s = "s" if len(lvs) >=2 else ""
+logging.debug("Found {} disk{} for domain {}".format(len(lvs),s,dom_name))
+
+def foreachlv(cmd):
+    rc = 0
+    if cmd:
+        for lv in lvs:
+            rendered_cmd = cmd.format(lv=lv)
+            logging.debug("Running: {}".format(rendered_cmd))
+            lvrc = os.system(rendered_cmd)
+            if lvrc != 0:
+                logging.error('Command exited with code {}: {}'.format(lvrc, rendered_cmd))
+            rc += lvrc
+    return rc
+
+def undefined():
+    pass
+
+exit(foreachlv(cmds.get(actions.get(action))))
